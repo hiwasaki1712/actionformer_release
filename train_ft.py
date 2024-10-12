@@ -4,6 +4,7 @@ import os
 import time
 import datetime
 from pprint import pprint
+import glob
 
 # torch imports
 import torch
@@ -69,6 +70,22 @@ def main(args):
     train_loader = make_data_loader(
         train_dataset, True, rng_generator, **cfg['loader'])
 
+    ### Checkpoint for finetuning
+    if ".pth.tar" in args.ckpt:
+        assert os.path.isfile(args.ckpt), "CKPT file does not exist!"
+        ckpt_file = args.ckpt
+    else:
+        assert os.path.isdir(args.ckpt), "CKPT file folder does not exist!"
+        if args.ckpt_epoch > 0:
+            ckpt_file = os.path.join(
+                args.ckpt, 'epoch_{:03d}.pth.tar'.format(args.ckpt_epoch)
+            )
+        else:
+            ckpt_file_list = sorted(glob.glob(os.path.join(args.ckpt, '*.pth.tar')))
+            ckpt_file = ckpt_file_list[-1]
+        assert os.path.exists(ckpt_file)
+        
+    
     """3. create model, optimizer, and scheduler"""
     # model
     model = make_meta_arch(cfg['model_name'], **cfg['model'])
@@ -79,6 +96,28 @@ def main(args):
     # schedule
     num_iters_per_epoch = len(train_loader)
     scheduler = make_scheduler(optimizer, cfg['opt'], num_iters_per_epoch)
+
+    """3.5 load ckpt""" ### For finetuning
+    print("=> loading checkpoint '{}'".format(ckpt_file))
+    # load ckpt, reset epoch / best rmse
+    checkpoint = torch.load(
+        ckpt_file,
+        map_location = lambda storage, loc: storage.cuda(cfg['devices'][0])
+    )
+    
+    ### Exclude classification head 
+    checkpoint_ex = {} 
+    for ky in checkpoint['state_dict_ema'].keys():
+        if ky[:15] != 'module.cls_head':
+            checkpoint_ex[ky] = checkpoint['state_dict_ema'][ky]
+        
+    # load ema model instead
+    print("Loading from EMA model ...")
+    model.load_state_dict(checkpoint_ex, strict=False)
+    del checkpoint
+
+    # not ideal for multi GPU training, ok for now
+    #model = nn.DataParallel(model, device_ids=cfg['devices'])
 
     # enable model EMA
     print("Using model EMA ...")
@@ -166,6 +205,10 @@ if __name__ == '__main__':
       description='Train a point-based transformer for action localization')
     parser.add_argument('config', metavar='DIR',
                         help='path to a config file')
+    parser.add_argument('ckpt', type=str, metavar='DIR',
+                        help='path to a checkpoint') ### For finetuning
+    parser.add_argument('-ckpt_epoch', type=int, default=-1,
+                        help='checkpoint epoch') ### For finetuning
     parser.add_argument('-p', '--print-freq', default=10, type=int,
                         help='print frequency (default: 10 iterations)')
     parser.add_argument('-c', '--ckpt-freq', default=5, type=int,
